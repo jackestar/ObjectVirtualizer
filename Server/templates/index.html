@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Scanner Control Panel</title>
+    <style>
+        body { display: flex; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; }
+        #controls-panel { width: 350px; padding: 15px; background-color: #fff; overflow-y: auto; height: 100vh; box-shadow: 2px 0 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; }
+        #render-container { flex-grow: 1; position: relative; }
+        #renderCanvas { display: block; width: 100%; height: 100%; }
+        h3 { border-bottom: 2px solid #eee; padding-bottom: 5px; margin-top: 20px; margin-bottom: 10px; color: #333; }
+        .control-group { margin-bottom: 12px; }
+        .control-group label { display: block; font-weight: 600; margin-bottom: 5px; color: #555; font-size: 0.9em;}
+        .control-group input { width: calc(100% - 10px); padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+        .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .status-item { background-color: #e9ecef; padding: 8px; border-radius: 4px; text-align: center; }
+        .status-item .label { font-size: 0.8em; color: #6c757d; }
+        .status-item .value { font-size: 1.2em; font-weight: bold; }
+        .status-item .value.on { color: #28a745; }
+        .status-item .value.off { color: #dc3545; }
+        button { padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; background-color: #007bff; color: white; font-weight: bold; width: 100%; margin-top: 5px; }
+        button:hover { background-color: #0056b3; }
+        button.danger { background-color: #dc3545; }
+        button.danger:hover { background-color: #c82333; }
+        #messages { margin-top: auto; font-size: 0.8em; color: #666; }
+    </style>
+</head>
+<body>
+    <div id="controls-panel">
+        <h3>ESP32 Status</h3>
+        <div class="status-grid">
+            <div class="status-item"><div class="label">Q1 (Restart)</div><div id="status_q1" class="value off">OFF</div></div>
+            <div class="status-item"><div class="label">Q2 (Rotate)</div><div id="status_q2" class="value off">OFF</div></div>
+            <div class="status-item"><div class="label">Q3 (Elevate)</div><div id="status_q3" class="value off">OFF</div></div>
+            <div class="status-item"><div class="label">Z Position</div><div id="status_z" class="value">0</div></div>
+        </div>
+        <div class="status-grid" style="margin-top: 10px;">
+             <div class="status-item"><div class="label">Points</div><div id="status_points" class="value">0</div></div>
+             <div class="status-item"><div class="label">ESP Seen</div><div id="status_last_seen" class="value" style="font-size: 0.9em;">never</div></div>
+        </div>
+
+        <h3>Configuration</h3>
+        <div class="control-group">
+            <label for="speedElv">Elevator Speed</label>
+            <input type="number" id="speedElv" class="config-input">
+        </div>
+        <div class="control-group">
+            <label for="speedTab">Turntable Speed</label>
+            <input type="number" id="speedTab" class="config-input">
+        </div>
+        <div class="control-group">
+            <label for="stepPerRead">Steps per Reading (Angular Resolution)</label>
+            <input type="number" id="stepPerRead" class="config-input">
+        </div>
+         <div class="control-group">
+            <label for="zStepIncrement">Z-Step Increment</label>
+            <input type="number" id="zStepIncrement" class="config-input">
+        </div>
+        
+        <h3>Sensor Settings</h3>
+        <div class="control-group">
+            <label for="readThreshold">Detection Threshold (Lower value = closer)</label>
+            <input type="number" id="readThreshold" class="config-input">
+        </div>
+        <div class="status-grid">
+            <div class="control-group"><label for="calib_analog_near">Analog Near</label><input type="number" id="calib_analog_near" class="config-input"></div>
+            <div class="control-group"><label for="calib_dist_near">Dist Near (mm)</label><input type="number" id="calib_dist_near" class="config-input"></div>
+            <div class="control-group"><label for="calib_analog_far">Analog Far</label><input type="number" id="calib_analog_far" class="config-input"></div>
+            <div class="control-group"><label for="calib_dist_far">Dist Far (mm)</label><input type="number" id="calib_dist_far" class="config-input"></div>
+        </div>
+        
+        <button id="sendConfigBtn">Update ESP32 Config</button>
+
+        <h3>Data Management</h3>
+        <button id="saveBtn">Save Points to CSV</button>
+        <button id="clearBtn" class="danger">Clear All Scanned Points</button>
+        
+        <div id="messages"></div>
+    </div>
+
+    <div id="render-container">
+        <div id="renderCanvas"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script>
+        // --- 3D Visualization ---
+        let scene, camera, renderer, controls, pointsGroup;
+
+        function init3D() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xdddddd);
+            const container = document.getElementById('render-container');
+            camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
+            camera.position.set(150, 150, 150);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            document.getElementById('renderCanvas').appendChild(renderer.domElement);
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+            const light = new THREE.DirectionalLight(0xffffff, 0.8);
+            light.position.set(50, 100, 50);
+            scene.add(light);
+            scene.add(new THREE.AxesHelper(50));
+            scene.add(new THREE.GridHelper(200, 10));
+            pointsGroup = new THREE.Group();
+            scene.add(pointsGroup);
+            animate();
+            window.addEventListener('resize', () => {
+                camera.aspect = container.clientWidth / container.clientHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(container.clientWidth, container.clientHeight);
+            });
+        }
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        function update3DScene(points) {
+            while (pointsGroup.children.length > 0) {
+                pointsGroup.remove(pointsGroup.children[0]);
+            }
+            const geometry = new THREE.SphereGeometry(0.8, 6, 6);
+            const material = new THREE.MeshPhongMaterial({ color: 0x007bff });
+            points.forEach(p => {
+                const mesh = new THREE.Mesh(geometry, material);
+                // Standard mapping: X, Y, Z. The server sends scaled Z
+                mesh.position.set(p.x, p.z, -p.y); // Y is up in Three.js, so we map Z to Y.
+                pointsGroup.add(mesh);
+            });
+        }
+
+        // --- UI and Communication Logic ---
+        const API_URL = '/api';
+
+        function displayMessage(text, type = 'info') {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+            if (type === 'error') messagesDiv.style.color = 'red';
+            else if (type === 'success') messagesDiv.style.color = 'green';
+            else messagesDiv.style.color = '#666';
+        }
+
+        async function fetchAndUpdateState() {
+            try {
+                const response = await fetch(`${API_URL}/status`);
+                const state = await response.json();
+
+                // Update status display
+                document.getElementById('status_q1').textContent = state.esp_status.q1 ? 'ON' : 'OFF';
+                document.getElementById('status_q1').className = state.esp_status.q1 ? 'value on' : 'value off';
+                document.getElementById('status_q2').textContent = state.esp_status.q2 ? 'ON' : 'OFF';
+                document.getElementById('status_q2').className = state.esp_status.q2 ? 'value on' : 'value off';
+                document.getElementById('status_q3').textContent = state.esp_status.q3 ? 'ON' : 'OFF';
+                document.getElementById('status_q3').className = state.esp_status.q3 ? 'value on' : 'value off';
+                document.getElementById('status_z').textContent = state.esp_status.z_pos;
+                document.getElementById('status_last_seen').textContent = state.esp_status.last_seen.split(' ')[1];
+                document.getElementById('status_points').textContent = state.scan_data.points_cartesian.length;
+
+                // Update 3D view
+                update3DScene(state.scan_data.points_cartesian);
+
+            } catch (error) {
+                displayMessage('Failed to connect to server.', 'error');
+                console.error(error);
+            }
+        }
+        
+        // Function to populate inputs only once on page load
+        async function populateInputs() {
+             try {
+                const response = await fetch(`${API_URL}/status`);
+                const state = await response.json();
+                 // Populate config inputs
+                for (const key in state.config) {
+                    const input = document.getElementById(key);
+                    if (input) {
+                        input.value = state.config[key];
+                    }
+                }
+            } catch (error) {
+                displayMessage('Failed to get initial config', 'error');
+            }
+        }
+
+        document.getElementById('sendConfigBtn').addEventListener('click', async () => {
+            const newConfig = {};
+            document.querySelectorAll('.config-input').forEach(input => {
+                newConfig[input.id] = input.value;
+            });
+            try {
+                const response = await fetch(`${API_URL}/config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newConfig)
+                });
+                const result = await response.json();
+                displayMessage(result.message, response.ok ? 'success' : 'error');
+            } catch (error) {
+                displayMessage('Failed to send config.', 'error');
+            }
+        });
+        
+        document.getElementById('saveBtn').addEventListener('click', async () => {
+             const response = await fetch('/save_points');
+             const result = await response.json();
+             displayMessage(result.message, response.ok ? 'success' : 'error');
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', async () => {
+             if (confirm('Are you sure you want to delete all scanned points? This cannot be undone.')) {
+                 const response = await fetch('/clear_points', { method: 'POST' });
+                 const result = await response.json();
+                 displayMessage(result.message, response.ok ? 'success' : 'error');
+             }
+        });
+
+        // --- Main Execution ---
+        init3D();
+        populateInputs(); // Populate inputs once on load
+        setInterval(fetchAndUpdateState, 1500); // Poll for status updates continuously
+    </script>
+</body>
+</html>
